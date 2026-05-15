@@ -1,0 +1,53 @@
+name: Build Mac Client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'student/**'
+      - 'common/**'
+      - 'student.py'
+      - 'build.py'
+      - 'requirements.txt'
+  workflow_dispatch:   # 手动触发
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller>=6.0.0
+          pip install PyQt6>=6.6.0 PyQt6-WebEngine>=6.6.0 psutil requests
+
+      - name: Build Mac app
+        run: python build.py mac
+
+      - name: Upload to PersonalAC server
+        env:
+          SERVER_URL: ${{ secrets.PAC_SERVER_URL }}
+          SYNC_TOKEN: ${{ secrets.PAC_SYNC_TOKEN }}
+        run: |
+          curl -f -X POST \
+            "${SERVER_URL}/download/upload?platform=mac" \
+            -H "x-sync-token: ${SYNC_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @dist/personalac-student-mac.zip \
+            --max-time 300
+          echo "Upload complete"
+
+      - name: Save artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: personalac-student-mac
+          path: dist/personalac-student-mac.zip
+          retention-days: 30
