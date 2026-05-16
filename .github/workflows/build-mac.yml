@@ -32,22 +32,13 @@ jobs:
       - name: Build Mac app
         run: python build.py mac
 
-      - name: Upload to PersonalAC server
-        env:
-          SERVER_URL: ${{ secrets.PAC_SERVER_URL }}
-          SYNC_TOKEN: ${{ secrets.PAC_SYNC_TOKEN }}
-        run: |
-          curl -f -X POST \
-            "${SERVER_URL}/download/upload?platform=mac" \
-            -H "x-sync-token: ${SYNC_TOKEN}" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @dist/personalac-student-mac.zip \
-            --max-time 300
-          echo "Upload complete"
-
-      - name: Save artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: personalac-student-mac
-          path: dist/personalac-student-mac.zip
-          retention-days: 30
+          tag_name: mac-latest
+          name: "PersonalAC for Mac (latest)"
+          body: "macOS 客户端，自动构建。下载后解压，将 .app 拖入应用程序文件夹。"
+          prerelease: false
+          files: dist/personalac-student-mac.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
