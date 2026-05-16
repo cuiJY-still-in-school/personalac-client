@@ -76,15 +76,29 @@ def build_mac() -> bool:
         print("[ERROR] Mac build failed")
         return False
 
-    # zip .app bundle
+    # create .dmg with Applications symlink
     app = Path("dist/personalac-student.app")
-    out = Path("dist/personalac-student-mac.zip")
+    dmg_staging = Path("dist/dmg-staging")
+    if dmg_staging.exists():
+        shutil.rmtree(dmg_staging)
+    dmg_staging.mkdir()
+    shutil.copytree(app, dmg_staging / "PersonalAC.app")
+    os.symlink("/Applications", dmg_staging / "Applications")
+
+    out = Path("dist/personalac-student-mac.dmg")
     if out.exists():
         out.unlink()
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in app.rglob("*"):
-            if f.is_file():
-                zf.write(f, f.relative_to(app.parent))
+    rc = run([
+        "hdiutil", "create",
+        "-volname", "PersonalAC",
+        "-srcfolder", str(dmg_staging),
+        "-ov", "-format", "UDZO",
+        str(out),
+    ])
+    shutil.rmtree(dmg_staging)
+    if rc != 0:
+        print("[ERROR] dmg creation failed")
+        return False
     print(f"[OK] {out}  ({out.stat().st_size // 1024 // 1024} MB)")
     return True
 

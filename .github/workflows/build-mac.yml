@@ -9,7 +9,10 @@ on:
       - 'student.py'
       - 'build.py'
       - 'requirements.txt'
-  workflow_dispatch:   # 手动触发
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-mac:
@@ -29,7 +32,7 @@ jobs:
           pip install pyinstaller>=6.0.0
           pip install PyQt6>=6.6.0 PyQt6-WebEngine>=6.6.0 psutil requests
 
-      - name: Build Mac app
+      - name: Build Mac DMG
         run: python build.py mac
 
       - name: Create GitHub Release
@@ -37,8 +40,6 @@ jobs:
         with:
           tag_name: mac-latest
           name: "PersonalAC for Mac (latest)"
-          body: "macOS 客户端，自动构建。下载后解压，将 .app 拖入应用程序文件夹。"
+          body: "macOS 客户端，自动构建。下载后双击 DMG，将 PersonalAC 拖入应用程序文件夹。"
           prerelease: false
-          files: dist/personalac-student-mac.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: dist/personalac-student-mac.dmg
