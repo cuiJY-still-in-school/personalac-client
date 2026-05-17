@@ -19,22 +19,33 @@ workflows:
       - name: Build DMG
         script: python3 build.py mac
 
-      - name: Upload to server
+      - name: Upload to server (chunked)
         script: |
           DMG="dist/personalac-student-mac.dmg"
           if [ ! -f "$DMG" ]; then
             echo "DMG not found" && exit 1
           fi
           echo "Size: $(du -sh $DMG | cut -f1)"
-          RESP=$(curl -s -w "\n%{http_code}" \
-            -X POST "${PAC_SERVER}/download/upload?platform=mac" \
-            -H "x-sync-token: ${PAC_TOKEN}" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @"$DMG")
-          CODE=$(echo "$RESP" | tail -1)
-          BODY=$(echo "$RESP" | head -1)
-          echo "HTTP $CODE: $BODY"
-          [ "$CODE" = "200" ] || exit 1
+          CHUNK_SIZE=$((80 * 1024 * 1024))
+          TMPDIR_CHUNKS=$(mktemp -d)
+          split -b $CHUNK_SIZE "$DMG" "$TMPDIR_CHUNKS/part_"
+          PARTS=("$TMPDIR_CHUNKS"/part_*)
+          TOTAL=${#PARTS[@]}
+          echo "Splitting into $TOTAL chunk(s)"
+          for i in "${!PARTS[@]}"; do
+            echo "Uploading chunk $((i+1))/$TOTAL..."
+            RESP=$(curl -s -w "\n%{http_code}" \
+              -X POST "${PAC_SERVER}/download/upload-chunk?platform=mac&chunk=${i}&total=${TOTAL}" \
+              -H "x-sync-token: ${PAC_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"${PARTS[$i]}")
+            CODE=$(echo "$RESP" | tail -1)
+            BODY=$(echo "$RESP" | head -1)
+            echo "HTTP $CODE: $BODY"
+            [ "$CODE" = "200" ] || exit 1
+          done
+          rm -rf "$TMPDIR_CHUNKS"
+          echo "All chunks uploaded successfully"
 
     artifacts:
       - dist/personalac-student-mac.dmg
