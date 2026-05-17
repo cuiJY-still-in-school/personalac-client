@@ -1,6 +1,7 @@
 import sys
 import time
 import logging
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -32,6 +33,22 @@ def _get_foreground_info_windows() -> tuple[str, str]:
         return "", ""
 
 
+def _get_foreground_info_mac() -> tuple[str, str]:
+    try:
+        import subprocess
+        script = 'tell application "System Events" to get {name, title of first window} of first application process whose frontmost is true'
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            out = result.stdout.strip()
+            parts = [p.strip() for p in out.split(",", 1)]
+            app_name = parts[0] if parts else ""
+            title = parts[1] if len(parts) > 1 else ""
+            return app_name, title
+    except Exception as e:
+        logger.debug("osascript foreground query failed: %s", e)
+    return "", ""
+
+
 def _get_foreground_info_fallback() -> tuple[str, str]:
     try:
         top = max(
@@ -49,6 +66,8 @@ def _get_foreground_info_fallback() -> tuple[str, str]:
 def get_foreground_info() -> tuple[str, str]:
     if sys.platform == "win32":
         return _get_foreground_info_windows()
+    if sys.platform == "darwin":
+        return _get_foreground_info_mac()
     return _get_foreground_info_fallback()
 
 
@@ -66,7 +85,7 @@ class _Session:
             "app_name": self.app_name,
             "window_title": self.window_title,
             "duration_seconds": max(duration, 1),
-            "timestamp": self.start_time.isoformat(),
+            "timestamp": int(self.start_time.timestamp() * 1000),  # ms epoch
         }
 
 
@@ -79,6 +98,7 @@ class ActivityMonitor(QThread):
         self.blocked_apps: list[str] = [a.lower() for a in (blocked_apps or [])]
         self._running = False
         self._pending: list[dict] = []
+        self._pending_lock = threading.Lock()
         self._current_session: Optional[_Session] = None
 
     def run(self):
@@ -93,7 +113,8 @@ class ActivityMonitor(QThread):
                     if self._current_session is not None:
                         record = self._current_session.finish()
                         if record["duration_seconds"] >= 2:
-                            self._pending.append(record)
+                            with self._pending_lock:
+                                self._pending.append(record)
                     self._current_session = _Session(app_name, window_title)
                     self.activity_changed.emit(app_name, window_title)
                 else:
@@ -106,14 +127,21 @@ class ActivityMonitor(QThread):
         if self._current_session is not None:
             record = self._current_session.finish()
             if record["duration_seconds"] >= 2:
-                self._pending.append(record)
+                with self._pending_lock:
+                    self._pending.append(record)
             self._current_session = None
         self.wait(3000)
 
     def get_pending_records(self) -> list[dict]:
-        records = list(self._pending)
-        self._pending.clear()
+        with self._pending_lock:
+            records = list(self._pending)
+            self._pending.clear()
         return records
+
+    def return_records(self, records: list[dict]):
+        """Put records back if sync failed."""
+        with self._pending_lock:
+            self._pending[:0] = records
 
     def update_blocked_apps(self, blocked_apps: list):
         self.blocked_apps = [a.lower() for a in blocked_apps]

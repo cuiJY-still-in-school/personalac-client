@@ -82,10 +82,7 @@ class PersonalACApi:
             return False
 
     def report_activity(self, records: list) -> bool:
-        if not records:
-            return True
-        result = self._post("/api/activity/report", {"records": records})
-        return result is not None
+        return self.report_activity_v2(records)
 
     def get_client_config(self) -> dict:
         """拉取服务端下发的客户端配置（blocked_apps、mode 等）"""
@@ -102,6 +99,24 @@ class PersonalACApi:
 
     def sync_mode(self, mode: str) -> None:
         self._post("/api/client/mode", {"mode": mode})
+
+    def verify_guardian(self, email: str, password: str) -> tuple[bool, str]:
+        """验证监护人密码，返回 (ok, error_message)"""
+        result = self._post("/api/client/guardian-verify", {"email": email, "password": password})
+        if result is None:
+            return False, "无法连接服务器"
+        return result.get("success", False), result.get("error", "验证失败")
+
+    def get_relay_pending(self) -> list:
+        result = self._get("/api/relay/pending")
+        if result and result.get("success"):
+            return result.get("data", [])
+        return []
+
+    def upload_screenshot(self, data: str) -> bool:
+        """上传 base64 JPEG 截图"""
+        result = self._post("/api/client/screenshot", {"data": data})
+        return result is not None and result.get("success", False)
 
     # ── 邀请码激活流程 ─────────────────────────────────────────────────────
 

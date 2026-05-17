@@ -263,14 +263,15 @@ class MainWindow(QMainWindow):
 
     def _check_mustdo(self):
         try:
-            todos = self.api.get_todos()
-            total = len(todos)
-            must = [t for t in todos if t.get("mustdo") or t.get("must_do")]
-            pending_must = [t for t in must if t.get("status") not in ("done", "completed", "finished")]
-            done_must = len(must) - len(pending_must)
-            self.update_progress(done_must, len(must))
+            cfg = self.api.get_client_config()
+            if not cfg:
+                self.set_connection_status(False)
+                return
             self.set_connection_status(True)
-            if len(must) > 0 and len(pending_must) == 0:
+            done = cfg.get('must_do_done', 0)
+            total = cfg.get('must_do_total', 0)
+            self.update_progress(done, total)
+            if cfg.get('mode') in ('pet', 'free'):
                 self._mustdo_timer.stop()
                 self.mustdo_complete.emit()
         except Exception:

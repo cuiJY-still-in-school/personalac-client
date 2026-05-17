@@ -1,14 +1,18 @@
+import json
+import os
 import sys
 import logging
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QMessageBox, QWidget,
+    QLineEdit, QPushButton, QMessageBox, QWidget, QSystemTrayIcon,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
 from common.config import Config
 from common.api import PersonalACApi
+from common.autostart import enable as autostart_enable, is_enabled as autostart_is_enabled
+from student.drive import DriveSync, DriveSettingsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +371,13 @@ class StudentApp:
         self._monitor = None
         self._main_window = None
         self._pet_window = None
+        self._tray = None
         self._activity_sync_timer: QTimer | None = None
+        self._config_poll_timer: QTimer | None = None
+        self._notify_timer: QTimer | None = None
+        self._seen_relay_ids: set[str] = set()
+        self._screenshot_uploader = None
+        self._drive_sync: DriveSync | None = None
 
     def run(self) -> int:
         self._qt_app = QApplication(sys.argv)
@@ -392,12 +402,25 @@ class StudentApp:
                 return 0
             self._api = PersonalACApi(self._config.server_url, self._config.sync_token)
 
+        # Windows: request admin if needed (re-launches and exits current process)
+        if sys.platform == "win32":
+            from student.elevation import ensure_admin_or_warn
+            if not ensure_admin_or_warn():
+                return 0
+
         self._pull_server_config()
+        self._load_offline_queue()
         self._start_monitor()
         self._start_activity_sync()
+        self._start_config_poll()
+        self._start_notification_poll()
+        self._setup_tray()
+        self._check_mac_permissions()
+        self._ensure_autostart()
+        self._start_screenshot_uploader()
+        self._start_drive_sync()
 
-        complete = self._config.mode in ('pet', 'free') or self._api.check_mustdo_complete()
-        if complete or self._config.mode in ("pet", "free"):
+        if self._config.mode in ('pet', 'free'):
             self._show_pet()
         else:
             self._show_locked()
@@ -429,11 +452,209 @@ class StudentApp:
         self._activity_sync_timer.timeout.connect(self._sync_activity)
         self._activity_sync_timer.start()
 
+    def _start_config_poll(self):
+        self._config_poll_timer = QTimer()
+        self._config_poll_timer.setInterval(2 * 60 * 1000)  # every 2 min
+        self._config_poll_timer.timeout.connect(self._poll_config)
+        self._config_poll_timer.start()
+
     def _sync_activity(self):
-        if self._monitor and self._api:
-            records = self._monitor.get_pending_records()
-            if records:
-                self._api.report_activity(records)
+        if not self._monitor or not self._api:
+            return
+        records = self._monitor.get_pending_records()
+        if not records:
+            return
+        ok = self._api.report_activity_v2(records)
+        if not ok:
+            # Save to disk so records survive a crash or restart
+            self._save_offline_queue(records)
+        # Update pet activity summary regardless
+        if self._pet_window:
+            total_secs = sum(r.get("duration_seconds", 0) for r in records)
+            h = total_secs // 3600
+            m = (total_secs % 3600) // 60
+            summary = f"{h}小时{m}分" if h else (f"{m}分钟" if m else "刚开始")
+            self._pet_window.update_activity_summary(summary)
+
+    def _poll_config(self):
+        """Re-fetch server config to detect mode changes (e.g. parent adds must-do task)."""
+        if not self._api:
+            return
+        cfg = self._api.get_client_config()
+        if not cfg:
+            return
+        self._config.blocked_apps = cfg.get('blocked_apps', [])
+        if self._monitor:
+            self._monitor.update_blocked_apps(self._config.blocked_apps)
+
+        server_mode = cfg.get('mode')
+        if server_mode and server_mode != self._config.mode:
+            self._config.mode = server_mode
+            self._config.save()
+            self._update_tray_tooltip()
+            if server_mode == 'locked' and self._pet_window and self._pet_window.isVisible():
+                self._show_locked()
+                if self._tray:
+                    self._tray.notify("专注时间开始", "家长设置了新任务，请先完成必做任务",
+                                      QSystemTrayIcon.MessageIcon.Warning)
+            elif server_mode in ('pet', 'free') and self._main_window and self._main_window.isVisible():
+                self._show_pet()
+
+        # Update pet mood based on task status
+        if self._pet_window:
+            total = cfg.get('must_do_total', 0)
+            done = cfg.get('must_do_done', 0)
+            if total > 0 and done < total:
+                self._pet_window.set_mood('thinking')
+            elif total > 0 and done >= total:
+                self._pet_window.set_mood('happy')
+
+        # 动态调整截图间隔
+        interval_min = cfg.get('screenshot_interval_min', 10)
+        if self._screenshot_uploader:
+            self._screenshot_uploader.set_interval(int(interval_min) * 60 * 1000)
+
+    # ── 开机自启 ──────────────────────────────────────────────────────────────
+
+    def _ensure_autostart(self):
+        if not autostart_is_enabled():
+            autostart_enable()
+
+    # ── 截图上传 ──────────────────────────────────────────────────────────────
+
+    def _start_screenshot_uploader(self):
+        if not self._api:
+            return
+        from student.screenshot import ScreenshotUploader
+        self._screenshot_uploader = ScreenshotUploader(self._api)
+        self._screenshot_uploader.start()
+
+    # ── 云盘同步 ──────────────────────────────────────────────────────────────
+
+    def _start_drive_sync(self):
+        if not self._api:
+            return
+        self._drive_sync = DriveSync(self._api, self._config)
+
+    def _show_drive_settings(self):
+        if not self._drive_sync:
+            return
+        dlg = DriveSettingsDialog(self._drive_sync)
+        dlg.exec()
+
+    # ── Mac 辅助功能权限 ──────────────────────────────────────────────────────
+
+    def _check_mac_permissions(self):
+        if sys.platform != "darwin":
+            return
+        import subprocess
+        result = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of first process whose frontmost is true'],
+            capture_output=True, timeout=3
+        )
+        if result.returncode != 0:
+            import subprocess as sp
+            QMessageBox.information(
+                None, "需要辅助功能权限",
+                "PersonalAC 需要辅助功能权限才能监控屏幕使用时间。\n\n"
+                "请前往：系统设置 → 隐私与安全性 → 辅助功能\n"
+                "将 PersonalAC 添加到允许列表后重启应用。"
+            )
+            sp.run(["open",
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+
+    # ── 系统托盘 ──────────────────────────────────────────────────────────────
+
+    def _setup_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("System tray not available on this platform")
+            return
+        from student.tray import SystemTray
+        self._tray = SystemTray()
+        self._tray.set_api(self._api)
+        self._tray.show_pet.connect(self._on_tray_show_pet)
+        self._tray.show_main.connect(self._on_tray_show_main)
+        self._tray.open_drive_settings.connect(self._show_drive_settings)
+        self._tray.quit_verified.connect(self._on_quit_verified)
+        self._update_tray_tooltip()
+
+    def _update_tray_tooltip(self):
+        if self._tray:
+            self._tray.update_tooltip(self._config.mode, self._config.student_name or "学生")
+
+    def _on_tray_show_pet(self):
+        if self._pet_window:
+            self._pet_window.show()
+            if self._tray:
+                self._tray.set_pet_visible(True)
+
+    def _on_tray_show_main(self):
+        self._on_open_main()
+
+    def _on_quit_verified(self):
+        logger.info("Quit verified by guardian, exiting")
+        if self._monitor:
+            self._monitor.stop()
+        if self._activity_sync_timer:
+            self._activity_sync_timer.stop()
+        if self._screenshot_uploader:
+            self._screenshot_uploader.stop()
+        QApplication.quit()
+
+    # ── 离线队列持久化 ────────────────────────────────────────────────────────
+
+    def _queue_path(self) -> str:
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        return os.path.join(base, "PersonalAC", "pending_queue.json")
+
+    def _load_offline_queue(self):
+        path = self._queue_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                records = json.load(f)
+            if records and self._monitor:
+                self._monitor.return_records(records)
+                logger.info("Loaded %d offline records from disk queue", len(records))
+            os.remove(path)
+        except Exception as e:
+            logger.warning("Load offline queue failed: %s", e)
+
+    def _save_offline_queue(self, records: list):
+        path = self._queue_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(records, f)
+        except Exception as e:
+            logger.warning("Save offline queue failed: %s", e)
+
+    # ── 通知轮询 ──────────────────────────────────────────────────────────────
+
+    def _start_notification_poll(self):
+        self._notify_timer = QTimer()
+        self._notify_timer.setInterval(60_000)  # every 1 min
+        self._notify_timer.timeout.connect(self._check_notifications)
+        self._notify_timer.start()
+
+    def _check_notifications(self):
+        if not self._api or not self._tray:
+            return
+        try:
+            items = self._api.get_relay_pending()
+            for item in items:
+                rid = item.get("id", "")
+                if rid in self._seen_relay_ids:
+                    continue
+                self._seen_relay_ids.add(rid)
+                who = "家长" if item.get("from_role") == "guardian" else "孩子"
+                caption = item.get("caption") or "发来了一条消息"
+                self._tray.notify(f"来自{who}的消息", caption,
+                                  duration_ms=8000)
+        except Exception as e:
+            logger.debug("notification poll error: %s", e)
 
     def _show_locked(self):
         from student.main_window import MainWindow
@@ -450,7 +671,8 @@ class StudentApp:
             self._pet_window = PetWindow(self._config)
             self._pet_window.open_main.connect(self._on_open_main)
         self._pet_window.show()
-
+        if self._tray:
+            self._tray.set_pet_visible(True)
         if self._main_window and self._main_window.isVisible():
             self._main_window.hide()
 
@@ -460,6 +682,9 @@ class StudentApp:
         self._sync_activity()
         if self._api:
             self._api.sync_mode("pet")
+        self._update_tray_tooltip()
+        if self._tray:
+            self._tray.notify("任务全部完成！", "做得很好，进入自由时间", duration_ms=6000)
         self._show_pet()
 
     def _on_open_main(self):

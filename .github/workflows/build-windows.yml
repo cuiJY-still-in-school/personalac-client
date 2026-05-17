@@ -1,0 +1,58 @@
+name: Build Windows Client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'student/**'
+      - 'common/**'
+      - 'student.py'
+      - 'build.py'
+      - 'requirements.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller>=6.0.0
+          pip install PyQt6>=6.6.0 psutil requests pywin32
+
+      - name: Build Windows ZIP
+        run: python build.py win
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: personalac-windows
+          path: dist/personalac-student-win64-*.zip
+          retention-days: 7
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: win-latest
+          name: "PersonalAC for Windows (latest)"
+          body: |
+            Windows 客户端，自动构建。
+
+            **安装方式：**
+            1. 下载并解压 `personalac-student-win64-*.zip`
+            2. 运行 `personalac-student.exe`
+            3. 首次启动输入服务器邀请链接
+          prerelease: false
+          files: dist/personalac-student-win64-*.zip
