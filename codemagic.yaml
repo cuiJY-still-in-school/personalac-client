@@ -1,0 +1,40 @@
+workflows:
+  build-mac-dmg:
+    name: Build Mac DMG
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    environment:
+      vars:
+        PAC_SERVER: "http://jkt100.cn:7575"
+      groups:
+        - pac_secrets
+
+    scripts:
+      - name: Install dependencies
+        script: |
+          python3 -m pip install --upgrade pip --quiet
+          pip3 install pyinstaller PyQt6 PyQt6-WebEngine psutil requests --quiet
+
+      - name: Build DMG
+        script: python3 build.py mac
+
+      - name: Upload to server
+        script: |
+          DMG="dist/personalac-student-mac.dmg"
+          if [ ! -f "$DMG" ]; then
+            echo "DMG not found" && exit 1
+          fi
+          echo "Size: $(du -sh $DMG | cut -f1)"
+          RESP=$(curl -s -w "\n%{http_code}" \
+            -X POST "${PAC_SERVER}/download/upload?platform=mac" \
+            -H "x-sync-token: ${PAC_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$DMG")
+          CODE=$(echo "$RESP" | tail -1)
+          BODY=$(echo "$RESP" | head -1)
+          echo "HTTP $CODE: $BODY"
+          [ "$CODE" = "200" ] || exit 1
+
+    artifacts:
+      - dist/personalac-student-mac.dmg
