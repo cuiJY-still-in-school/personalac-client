@@ -6,7 +6,7 @@ workflows:
 
     environment:
       vars:
-        PAC_SERVER: "http://jkt100.cn:7575"
+        PAC_SERVER: "http://jkt100.cn"
       groups:
         - pac_secrets
 
